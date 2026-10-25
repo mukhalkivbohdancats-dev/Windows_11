@@ -50,10 +50,10 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.cache/pip
-          key: windows11-android-api24-${{ runner.os }}-${{ hashFiles('.github/workflows/Windows_11.yml') }}-${{ github.run_id }}
+          key: windows11-android-ndkapi24-${{ runner.os }}-${{ hashFiles('.github/workflows/Windows_11.yml') }}-${{ github.run_id }}
           restore-keys: |
-            windows11-android-api24-${{ runner.os }}-${{ hashFiles('.github/workflows/Windows_11.yml') }}-
-            windows11-android-api24-${{ runner.os }}-
+            windows11-android-ndkapi24-${{ runner.os }}-${{ hashFiles('.github/workflows/Windows_11.yml') }}-
+            windows11-android-ndkapi24-${{ runner.os }}-
 
       - name: Install build dependencies
         run: |
@@ -325,6 +325,7 @@ jobs:
           fullscreen = 0
           android.api = 35
           android.minapi = 24
+          android.ndk_api = 24
           android.archs = arm64-v8a
           android.accept_sdk_license = True
 
@@ -341,8 +342,8 @@ jobs:
           BUILDOZER_WARN_ON_ROOT: "0"
           PYTHONUNBUFFERED: "1"
         run: |
-          # minapi=24 is intentional: Android's preadv/pwritev declarations
-          # used by recent CPython Android builds require API 24 or newer.
+          # Both minapi and ndk_api must be 24: CPython uses preadv/pwritev,
+          # which are declared by the Android NDK starting at API 24.
           buildozer -v android debug
 
       - name: Put APK in apk/Windows_11.apk
