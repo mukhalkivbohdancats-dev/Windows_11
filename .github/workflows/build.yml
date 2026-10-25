@@ -1,0 +1,36 @@
+
+name: Build Windows 11 APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "NovaShell11_Windows11_Project.zip"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare folders
+        run: mkdir -p apk project
+
+      - name: Extract project ZIP
+        run: |
+          unzip -o NovaShell11_Windows11_Project.zip -d project
+          find project -maxdepth 3 -type f
+
+      - name: Check Android build requirements
+        run: |
+          echo "The original project uses Tkinter."
+          echo "Tkinter is not supported by Android."
+          echo "An Android-compatible app implementation is required."
+          echo "APK compilation is stopped until that implementation exists."
+          exit 1
