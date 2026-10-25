@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - ".github/workflows/build.yml"
       - ".github/workflows/Windows_11.yml"
 
 permissions:
@@ -12,31 +11,27 @@ permissions:
 
 jobs:
   build:
-    name: Download project and build Windows_11.apk
+    name: Build Windows_11.apk
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 180
 
     steps:
-      - name: Checkout repository (for saving the finished APK)
-        uses: actions/checkout@v4
-
-      - name: Download the user's ZIP from GitHub
+      - name: Download the project ZIP
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p input_project android_app apk
-          curl --fail --location --retry 3 \
+          mkdir -p source android_app apk
+          curl -fsSL --retry 3 \
             "https://raw.githubusercontent.com/mukhalkivbohdancats-dev/Windows_11/main/NovaShell11_Windows11_Project.zip" \
-            --output input_project/NovaShell11_Windows11_Project.zip
-          file input_project/NovaShell11_Windows11_Project.zip
-          unzip -oq input_project/NovaShell11_Windows11_Project.zip -d input_project/extracted
-          echo "Downloaded and extracted source archive:"
-          find input_project/extracted -maxdepth 3 -type f | head -80
+            -o source/NovaShell11_Windows11_Project.zip
+          unzip -oq source/NovaShell11_Windows11_Project.zip -d source/extracted
+          echo "Project ZIP downloaded and extracted."
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -44,18 +39,31 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install Android build tools
+      - name: Restore Android build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cache/pip
+          key: windows11-android-api24-${{ runner.os }}-${{ hashFiles('.github/workflows/Windows_11.yml') }}-${{ github.run_id }}
+          restore-keys: |
+            windows11-android-api24-${{ runner.os }}-${{ hashFiles('.github/workflows/Windows_11.yml') }}-
+            windows11-android-api24-${{ runner.os }}-
+
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             git zip unzip curl openjdk-17-jdk \
             autoconf libtool pkg-config zlib1g-dev \
-            libncurses5-dev libncursesw5-dev libtinfo6 \
-            cmake libffi-dev libssl-dev automake libltdl-dev
+            libncurses5-dev libncursesw5-dev cmake \
+            libffi-dev libssl-dev automake libltdl-dev
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install buildozer "cython==0.29.36"
 
-      - name: Generate Android-compatible Windows 11 edition
+      - name: Generate Android-compatible app
         shell: bash
         run: |
           set -euo pipefail
@@ -63,8 +71,8 @@ jobs:
           import ast
           import operator
           import os
+          import calendar
           from datetime import datetime
-          import calendar as calendar_module
 
           from kivy.app import App
           from kivy.clock import Clock
@@ -86,92 +94,96 @@ jobs:
           MUTED = (0.67, 0.73, 0.83, 1)
           GREEN = (0.20, 0.78, 0.55, 1)
 
-          def card(**kwargs):
+          def make_card(**kwargs):
               widget = BoxLayout(**kwargs)
               with widget.canvas.before:
                   Color(*PANEL)
-                  widget._bg = RoundedRectangle(pos=widget.pos, size=widget.size,
-                                                radius=[dp(16)])
-              widget.bind(pos=lambda obj, value: setattr(obj._bg, "pos", value),
-                          size=lambda obj, value: setattr(obj._bg, "size", value))
+                  widget._background = RoundedRectangle(
+                      pos=widget.pos, size=widget.size, radius=[dp(15)])
+              widget.bind(
+                  pos=lambda obj, value: setattr(obj._background, "pos", value),
+                  size=lambda obj, value: setattr(obj._background, "size", value))
               return widget
 
-          def safe_calculate(expression):
+          def calculate(expression):
               if not expression or len(expression) > 100:
                   raise ValueError("Invalid expression")
               tree = ast.parse(expression, mode="eval")
-              binary_ops = {
+              operations = {
                   ast.Add: operator.add, ast.Sub: operator.sub,
                   ast.Mult: operator.mul, ast.Div: operator.truediv,
                   ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
                   ast.Pow: operator.pow,
               }
-              unary_ops = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+              unary = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
               def visit(node):
                   if isinstance(node, ast.Expression):
                       return visit(node.body)
                   if isinstance(node, ast.Constant) and type(node.value) in (int, float):
                       return node.value
-                  if isinstance(node, ast.BinOp) and type(node.op) in binary_ops:
+                  if isinstance(node, ast.BinOp) and type(node.op) in operations:
                       left, right = visit(node.left), visit(node.right)
                       if isinstance(node.op, ast.Pow) and abs(right) > 8:
                           raise ValueError("Exponent too large")
-                      result = binary_ops[type(node.op)](left, right)
+                      result = operations[type(node.op)](left, right)
                       if abs(result) > 1e100:
                           raise ValueError("Result too large")
                       return result
-                  if isinstance(node, ast.UnaryOp) and type(node.op) in unary_ops:
-                      return unary_ops[type(node.op)](visit(node.operand))
-                  raise ValueError("Only basic arithmetic is allowed")
+                  if isinstance(node, ast.UnaryOp) and type(node.op) in unary:
+                      return unary[type(node.op)](visit(node.operand))
+                  raise ValueError("Only arithmetic is supported")
               return visit(tree)
 
           class Windows11App(App):
               def build(self):
                   self.title = "Windows 11"
-                  self.notes_path = os.path.join(self.user_data_dir, "notes.txt")
+                  self.notes_file = os.path.join(self.user_data_dir, "notes.txt")
                   Window.clearcolor = BG
-                  root = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(12))
+                  root = BoxLayout(orientation="vertical",
+                                   padding=dp(13), spacing=dp(10))
 
-                  header = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(8))
-                  title_box = BoxLayout(orientation="vertical", spacing=dp(1))
-                  title_box.add_widget(Label(text="[b]Windows 11[/b]", markup=True,
-                                             color=TEXT, font_size=sp(24),
-                                             halign="left", valign="middle"))
-                  title_box.add_widget(Label(text="NovaShell Mobile Edition", color=MUTED,
-                                             font_size=sp(12), halign="left"))
-                  header.add_widget(title_box)
-                  self.time_label = Label(text="", color=TEXT, font_size=sp(14),
-                                          size_hint_x=.48)
-                  header.add_widget(self.time_label)
+                  header = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(6))
+                  brand = BoxLayout(orientation="vertical", spacing=dp(1))
+                  brand.add_widget(Label(
+                      text="[b]Windows 11[/b]", markup=True, color=TEXT,
+                      font_size=sp(23), halign="left", valign="middle"))
+                  brand.add_widget(Label(
+                      text="NovaShell Mobile Edition", color=MUTED,
+                      font_size=sp(12), halign="left"))
+                  header.add_widget(brand)
+                  self.clock_label = Label(text="", color=TEXT,
+                                           font_size=sp(13), size_hint_x=.42)
+                  header.add_widget(self.clock_label)
                   root.add_widget(header)
 
-                  welcome = card(orientation="vertical", padding=dp(16), spacing=dp(5),
-                                 size_hint_y=None, height=dp(118))
-                  welcome.add_widget(Label(text="[b]Welcome back[/b]", markup=True,
-                                           color=TEXT, font_size=sp(22), halign="left"))
-                  welcome.add_widget(Label(
+                  hero = make_card(orientation="vertical", padding=dp(14),
+                                   spacing=dp(4), size_hint_y=None, height=dp(100))
+                  hero.add_widget(Label(
+                      text="[b]Welcome back[/b]", markup=True,
+                      color=TEXT, font_size=sp(21), halign="left"))
+                  hero.add_widget(Label(
                       text="A touch-friendly desktop inspired by Windows 11.",
                       color=MUTED, font_size=sp(13), halign="left"))
-                  root.add_widget(welcome)
+                  root.add_widget(hero)
 
                   scroll = ScrollView()
-                  grid = GridLayout(cols=2, spacing=dp(10), padding=(0, dp(2)),
-                                    size_hint_y=None)
+                  grid = GridLayout(cols=2, spacing=dp(9), size_hint_y=None)
                   grid.bind(minimum_height=grid.setter("height"))
-                  apps = [
+                  entries = [
                       ("Calculator", "Math tools", self.open_calculator),
                       ("Notes", "Write and save", self.open_notes),
                       ("Calendar", "Monthly view", self.open_calendar),
                       ("Clock", "Time and date", self.open_clock),
-                      ("Timer", "Countdown timer", self.open_timer),
+                      ("Timer", "Countdown", self.open_timer),
                       ("About", "App information", self.open_about),
                   ]
-                  for name, subtitle, callback in apps:
-                      tile = card(orientation="vertical", padding=dp(10), spacing=dp(5),
-                                  size_hint_y=None, height=dp(118))
-                      tile.add_widget(Label(text="[b]" + name + "[/b]", markup=True,
-                                            color=TEXT, font_size=sp(17)))
+                  for name, subtitle, callback in entries:
+                      tile = make_card(orientation="vertical", padding=dp(9),
+                                       spacing=dp(4), size_hint_y=None, height=dp(116))
+                      tile.add_widget(Label(
+                          text="[b]" + name + "[/b]", markup=True,
+                          color=TEXT, font_size=sp(17)))
                       tile.add_widget(Label(text=subtitle, color=MUTED, font_size=sp(12)))
                       button = Button(text="Open", size_hint_y=None, height=dp(34),
                                       background_normal="", background_color=BLUE,
@@ -181,122 +193,117 @@ jobs:
                       grid.add_widget(tile)
                   scroll.add_widget(grid)
                   root.add_widget(scroll)
-
-                  root.add_widget(Label(text="Python • Kivy • Android / ARM64",
-                                        color=MUTED, size_hint_y=None, height=dp(22),
-                                        font_size=sp(11)))
+                  root.add_widget(Label(
+                      text="Python • Kivy • Android / ARM64", color=MUTED,
+                      size_hint_y=None, height=dp(22), font_size=sp(11)))
                   Clock.schedule_interval(self.update_clock, 1)
                   self.update_clock(0)
                   return root
 
               def update_clock(self, _dt):
-                  if hasattr(self, "time_label"):
-                      self.time_label.text = datetime.now().strftime("%a\n%H:%M:%S")
+                  if hasattr(self, "clock_label"):
+                      self.clock_label.text = datetime.now().strftime("%a\\n%H:%M:%S")
 
-              def popup(self, title, content, size=(.92, .82)):
-                  Popup(title=title, content=content, size_hint=size,
-                        auto_dismiss=True).open()
+              def show_popup(self, title, content, size=(.92, .82)):
+                  Popup(title=title, content=content, size_hint=size).open()
 
               def open_calculator(self, *_):
                   box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
-                  expr = TextInput(hint_text="Example: (12 + 8) * 3", multiline=False,
-                                   size_hint_y=None, height=dp(52), font_size=sp(18))
-                  result = Label(text="Your result appears here", color=TEXT, font_size=sp(16))
-                  def calculate(_button):
+                  entry = TextInput(hint_text="Example: (12 + 8) * 3", multiline=False,
+                                    size_hint_y=None, height=dp(50), font_size=sp(18))
+                  result = Label(text="Result appears here", color=TEXT, font_size=sp(16))
+                  def run(_button):
                       try:
-                          result.text = str(safe_calculate(expr.text.strip()))
+                          result.text = str(calculate(entry.text.strip()))
                       except Exception:
                           result.text = "Invalid expression"
-                  btn = Button(text="Calculate", size_hint_y=None, height=dp(48),
-                               background_normal="", background_color=BLUE)
-                  btn.bind(on_release=calculate)
-                  box.add_widget(expr)
-                  box.add_widget(btn)
+                  button = Button(text="Calculate", size_hint_y=None, height=dp(46),
+                                  background_normal="", background_color=BLUE)
+                  button.bind(on_release=run)
+                  box.add_widget(entry)
+                  box.add_widget(button)
                   box.add_widget(result)
-                  self.popup("Calculator", box)
+                  self.show_popup("Calculator", box)
 
               def open_notes(self, *_):
                   box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
-                  editor = TextInput(text="", hint_text="Write your notes here…",
-                                     multiline=True, font_size=sp(16))
+                  editor = TextInput(hint_text="Write notes here…", multiline=True, font_size=sp(16))
                   try:
-                      with open(self.notes_path, "r", encoding="utf-8") as handle:
-                          editor.text = handle.read()
+                      with open(self.notes_file, "r", encoding="utf-8") as file:
+                          editor.text = file.read()
                   except FileNotFoundError:
                       pass
-                  status = Label(text="", color=GREEN, size_hint_y=None, height=dp(24))
+                  status = Label(text="", color=GREEN, size_hint_y=None, height=dp(22))
                   def save(_button):
-                      with open(self.notes_path, "w", encoding="utf-8") as handle:
-                          handle.write(editor.text)
+                      with open(self.notes_file, "w", encoding="utf-8") as file:
+                          file.write(editor.text)
                       status.text = "Saved on this device"
-                  btn = Button(text="Save notes", size_hint_y=None, height=dp(46),
-                               background_normal="", background_color=BLUE)
-                  btn.bind(on_release=save)
+                  button = Button(text="Save notes", size_hint_y=None, height=dp(44),
+                                  background_normal="", background_color=BLUE)
+                  button.bind(on_release=save)
                   box.add_widget(editor)
-                  box.add_widget(btn)
+                  box.add_widget(button)
                   box.add_widget(status)
-                  self.popup("Notes", box, (.94, .88))
+                  self.show_popup("Notes", box, (.94, .88))
 
               def open_calendar(self, *_):
                   now = datetime.now()
                   box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
                   box.add_widget(Label(text=now.strftime("%B %Y"), color=TEXT,
                                        font_size=sp(22), size_hint_y=None, height=dp(40)))
-                  box.add_widget(Label(text=calendar_module.month(now.year, now.month),
+                  box.add_widget(Label(text=calendar.month(now.year, now.month),
                                        color=TEXT, font_size=sp(16)))
-                  self.popup("Calendar", box, (.92, .70))
+                  self.show_popup("Calendar", box, (.92, .70))
 
               def open_clock(self, *_):
-                  box = BoxLayout(orientation="vertical", padding=dp(18), spacing=dp(10))
+                  box = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(8))
                   box.add_widget(Label(text=datetime.now().strftime("%H:%M:%S"),
                                        color=TEXT, font_size=sp(32)))
                   box.add_widget(Label(text=datetime.now().strftime("%A, %d %B %Y"),
-                                       color=MUTED, font_size=sp(16)))
-                  self.popup("Clock", box, (.90, .48))
+                                       color=MUTED, font_size=sp(15)))
+                  self.show_popup("Clock", box, (.90, .48))
 
               def open_timer(self, *_):
                   box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
-                  field = TextInput(hint_text="Seconds (e.g. 60)", multiline=False,
-                                    input_filter="int", size_hint_y=None, height=dp(50))
-                  display = Label(text="Ready", color=TEXT, font_size=sp(24))
-                  state = {"remaining": 0, "event": None}
+                  field = TextInput(hint_text="Seconds (1 to 86400)", multiline=False,
+                                    input_filter="int", size_hint_y=None, height=dp(48))
+                  display = Label(text="Ready", color=TEXT, font_size=sp(23))
+                  state = {"left": 0, "event": None}
                   def tick(_dt):
-                      state["remaining"] -= 1
-                      display.text = str(max(0, state["remaining"])) + " seconds"
-                      if state["remaining"] <= 0:
+                      state["left"] -= 1
+                      display.text = str(max(0, state["left"])) + " seconds"
+                      if state["left"] <= 0:
                           display.text = "Time is up!"
-                          if state["event"]:
-                              state["event"].cancel()
-                              state["event"] = None
+                          state["event"].cancel()
+                          state["event"] = None
                   def start(_button):
                       try:
                           seconds = int(field.text)
-                          if seconds < 1 or seconds > 86400:
+                          if not 1 <= seconds <= 86400:
                               raise ValueError()
                           if state["event"]:
                               state["event"].cancel()
-                          state["remaining"] = seconds
+                          state["left"] = seconds
                           display.text = str(seconds) + " seconds"
                           state["event"] = Clock.schedule_interval(tick, 1)
                       except Exception:
-                          display.text = "Enter 1–86400 seconds"
-                  btn = Button(text="Start timer", size_hint_y=None, height=dp(46),
-                               background_normal="", background_color=BLUE)
-                  btn.bind(on_release=start)
+                          display.text = "Enter a valid duration"
+                  button = Button(text="Start timer", size_hint_y=None, height=dp(44),
+                                  background_normal="", background_color=BLUE)
+                  button.bind(on_release=start)
                   box.add_widget(field)
-                  box.add_widget(btn)
+                  box.add_widget(button)
                   box.add_widget(display)
-                  self.popup("Timer", box, (.90, .60))
+                  self.show_popup("Timer", box, (.90, .60))
 
               def open_about(self, *_):
                   box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
                   box.add_widget(Label(
-                      text="NovaShell 11 — Android Edition\n\n"
-                           "This mobile app is generated from the project ZIP.\\n"
-                           "The original desktop interface uses Tkinter, which Android "
-                           "does not support, so this is an Android-compatible rewrite.",
+                      text="NovaShell 11 — Android Edition\\n\\n"
+                           "This mobile interface is generated during the build.\\n"
+                           "The original Tkinter desktop UI cannot run directly on Android.",
                       color=TEXT, font_size=sp(15)))
-                  self.popup("About", box)
+                  self.show_popup("About", box)
 
           if __name__ == "__main__":
               Windows11App().run()
@@ -314,7 +321,7 @@ jobs:
           orientation = portrait
           fullscreen = 0
           android.api = 35
-          android.minapi = 23
+          android.minapi = 24
           android.archs = arm64-v8a
           android.accept_sdk_license = True
 
@@ -324,48 +331,48 @@ jobs:
           SPEC
 
           python -m py_compile android_app/main.py
-          echo "Android source and build configuration created."
 
       - name: Build APK
         working-directory: android_app
         env:
           BUILDOZER_WARN_ON_ROOT: "0"
-        run: buildozer -v android debug
+          PYTHONUNBUFFERED: "1"
+        run: |
+          # minapi=24 is intentional: Android's preadv/pwritev declarations
+          # used by recent CPython Android builds require API 24 or newer.
+          buildozer -v android debug
 
-      - name: Create apk/Windows_11.apk
+      - name: Put APK in apk/Windows_11.apk
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p apk
           APK_PATH="$(find android_app/bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
           if [ -z "$APK_PATH" ]; then
-            echo "No APK was produced."
-            find android_app -maxdepth 4 -type f -print
+            echo "APK not found after build."
             exit 1
           fi
           cp "$APK_PATH" apk/Windows_11.apk
           ls -lh apk/Windows_11.apk
 
-      - name: Upload APK for download
-        uses: actions/upload-artifact@v4
-        with:
-          name: Windows_11
-          path: apk/Windows_11.apk
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Save APK into repository folder apk/Windows_11.apk
+      - name: Save APK into the GitHub repository
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add apk/Windows_11.apk
           if git diff --cached --quiet; then
-            echo "APK is unchanged; no commit needed."
+            echo "Repository already has the current APK."
           else
             git commit -m "Build Windows_11.apk"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git push
           fi
+
+      - name: Upload APK artifact as backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows_11
+          path: apk/Windows_11.apk
+          if-no-files-found: error
+          retention-days: 14
